@@ -3,7 +3,7 @@ The code is the implementation of Machine Unlearning by Setting Optimal labels (
 
 For the over-parameterized linear model, enter the folder ***"Linear"***, and run "RunMain.py".
 
-For the neural network model, enter the folder ***"Linear"***, and our code's directory structure is as follows:
+For the neural network model, enter the folder ***"NN"***, and our code's directory structure is as follows:
 ```
 .
 |-- data
