@@ -3,7 +3,7 @@ The code is the implementation of Machine Unlearning by Setting Optimal labels (
 
 ## Instructions for the code of MUSO
 
-Our code's directory structure is as following:
+Our code's directory structure is as follows:
 ```
 .
 |-- data
