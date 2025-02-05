@@ -24,19 +24,20 @@ def get_args():
     parser.add_argument('--model', type=str, default='ResNet18')
     parser.add_argument('--method', type=str, default='MUSO')
 
-    parser.add_argument('--epoch', type=int, default=3)
+    parser.add_argument('--epoch', type=int, default=2)
     parser.add_argument('--warmup_epoch', type=float, default=0)
     parser.add_argument('--subset_ratio', type=float, default=0.2)
     parser.add_argument('--epsilon_fix', type=float, default=1e-6)
-    parser.add_argument('--epsilon_rs', type=float, default=1e-6)
+    parser.add_argument('--epsilon_rs', type=float, default=1e-6)  
+    parser.add_argument('--if_fix', type=bool, default=False)
 
     parser.add_argument('--opt', type=str, default='adam')
     parser.add_argument('--lr', type=float, default=3e-5)
     parser.add_argument('--lr_scheduler', type=str, default="constant")
     parser.add_argument('--wd', type=float, default=0)
 
-    parser.add_argument('--resume', '-r', action='store_true')
-    parser.add_argument('--debug', '-nd', action='store_false')
+    parser.add_argument('--resume', '-r', action='store_true')  # use -r
+    parser.add_argument('--debug', '-nd', action='store_false')  # use -nd, files in /ckpt, else files in /degub_results
     parser.add_argument('--ckpt', type=str, default='ours.pth')
     parser.add_argument('--resumeCKPT', type=str)
 
@@ -45,7 +46,7 @@ def get_args():
 
     parser.add_argument('--batchsize', type=int, default=128)
     parser.add_argument('--dataset', type=str, default='cifar100')
-    parser.add_argument('--forget_per', type=int, default=10)
+    parser.add_argument('--forget_per', type=int, default=1)
     parser.add_argument('--temp', type=float, default=1, help="KL temperature for ours")
     args = parser.parse_args()
     return args
@@ -187,14 +188,18 @@ def get_right_side(retainDL, net, pretrain_model, device, args, w_0, w_p):
     all_ones = torch.ones(Z.shape[0], 1)
     all_ones = all_ones.to(device)
     Z_wbias = torch.cat([Z, all_ones], dim=1)  # Z with bias = N x (512+1)
-    Z_p_wbias = torch.cat([Z, all_ones], dim=1)  # Z with bias = N x (512+1)
 
-    eI = args.epsilon_rs * torch.eye(Z.shape[0])
-    eI = eI.to(device)
+    eI_N = args.epsilon_rs * torch.eye(Z.shape[0])
+    eI_N = eI_N.to(device)
 
-    Pi_rp = torch.t(Z_wbias) @ torch.linalg.inv(Z_wbias @ torch.t(Z_wbias) + eI) @ Z_p_wbias  # Pi_r = (512+1) x (512+1)
-    Pi_r = torch.t(Z_wbias) @ torch.linalg.inv(Z_wbias @ torch.t(Z_wbias) + eI) @ Z_wbias  # Pi_r = (512+1) x (512+1)
-    right_side = Pi_rp @ w_p - Pi_r @ w_0 + w_0 + w_p
+    # Changed by Woodbury Identity - Matrix Invertion Lemma 
+    eI_D = args.epsilon_rs * torch.eye(Z.shape[1] + 1)
+    eI_D = eI_D.to(device) 
+
+    fast_inv = torch.linalg.inv(eI_N) - torch.linalg.inv(eI_N) @ Z_wbias @ torch.linalg.inv(torch.linalg.inv(eI_D) + torch.t(Z_wbias) @ torch.linalg.inv(eI_N) @ Z_wbias) @ torch.t(Z_wbias) @ torch.linalg.inv(eI_N)
+    Pi_r = torch.t(Z_wbias) @ fast_inv @ Z_wbias
+
+    right_side = Pi_r @ (w_p - w_0) + w_0 + w_p
 
     return right_side
 
@@ -282,11 +287,16 @@ if __name__ == '__main__':
         right_side = get_right_side(retainDL, net, pretrain_model, device, args, w_0_wbias, w_p_wbias)
 
         mia_value = get_membership_attack_prob(retainDL, forgetDL, testDL, net)
-
-        if args.forget_per == 1:
-            avggap = 1/3*(abs(test_acc - 76.41) + abs(forget_acc - 75.28) + abs(mia_value - 55.44))
-        elif args.forget_per == 10:
-            avggap = 1/3*(abs(test_acc - 75.44) + abs(forget_acc - 74.68) + abs(mia_value - 54.59))
+        if args.dataset == 'cifar10':
+            if args.forget_per == 1:
+                avggap = 1/3*(abs(test_acc - 93.29) + abs(forget_acc - 92.96) + abs(mia_value - 79.00))
+            elif args.forget_per == 10:
+                avggap = 1/3*(abs(test_acc - 92.91) + abs(forget_acc - 93.57) + abs(mia_value - 80.75))
+        elif args.dataset == 'cifar100':
+            if args.forget_per == 1:
+                avggap = 1/3*(abs(test_acc - 76.41) + abs(forget_acc - 75.28) + abs(mia_value - 55.44))
+            elif args.forget_per == 10:
+                avggap = 1/3*(abs(test_acc - 75.44) + abs(forget_acc - 74.68) + abs(mia_value - 54.59))
 
         log.log_print("Test Acc:{:.3f}\tForget Acc:{:.3f}\tMIA:{:.3f}\tAvgGap:{:.3f}".format(test_acc, forget_acc, mia_value, avggap))
 
@@ -299,6 +309,4 @@ if __name__ == '__main__':
 
     save_running_results(args)
 
-
-
-
+    
