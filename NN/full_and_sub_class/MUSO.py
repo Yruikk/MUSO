@@ -13,6 +13,7 @@ from functools import partial
 from copy import deepcopy
 from PIL import Image
 import matplotlib.pyplot as plt
+import wandb
 
 best_model = None
 last_model = None
@@ -22,15 +23,15 @@ def get_args():
     parser = argparse.ArgumentParser(description='Ours training')
     parser.add_argument('--model', type=str, default='ResNet18')
 
-    parser.add_argument('--epoch', type=int, default=10)
+    parser.add_argument('--epoch', type=int, default=5)
     parser.add_argument('--warmup_epoch', type=float, default=0)
-    # parser.add_argument('--adjust_gap', type=int, default=3)
     parser.add_argument('--subset_ratio', type=float, default=0.2)
     parser.add_argument('--epsilon_fix', type=float, default=1e-6)
-    parser.add_argument('--epsilon_rs', type=float, default=1e-6)
+    parser.add_argument('--epsilon_rs', type=float, default=1e-6) 
+    parser.add_argument('--if_fix', type=bool, default=False)
 
-    parser.add_argument('--opt', type=str, default='sgd')
-    parser.add_argument('--lr', type=float, default=5.55e-5)  # search
+    parser.add_argument('--opt', type=str, default='adamw')
+    parser.add_argument('--lr', type=float, default=2.8e-4)
     parser.add_argument('--lr_scheduler', type=str, default="cosine")
     parser.add_argument('--wd', type=float, default=0)
 
@@ -40,10 +41,10 @@ def get_args():
     parser.add_argument('--resumeCKPT', type=str)
 
     parser.add_argument('--save_path', '-s', action='store_true')
-    parser.add_argument('--gpuid', type=str, default='1')
+    parser.add_argument('--gpuid', type=str, default='0')
 
     parser.add_argument('--batchsize', type=int, default=128)
-    parser.add_argument('--dataset', type=str, default='cifar20')
+    parser.add_argument('--dataset', type=str, default='cifar100')
     parser.add_argument('--forget_class', type=str, default='cattle')
     parser.add_argument('--temp', type=float, default=1, help="KL temperature for ours")
     args = parser.parse_args()
@@ -88,39 +89,27 @@ def get_dataloader(args, num_of_classes):
     return trainDL_full, retainDL_inTrainSet_woDataAugment, forgetDL_inTrainSet_woDataAugment, retainDL_inTestSet, forgetDL_inTestSet, testDL
 
 
-@torch.no_grad()
-def fix_w0_wp(trainDL, args, init_model, pretrain_model, current_model, device):
-    init_model.eval()
-    pretrain_model.eval()
-    current_model.eval()
-    for batch_idx, batch_data in enumerate(trainDL):
-        inputs = batch_data[0]
-        inputs = inputs.to(device)
-        outputs_y0 = init_model(inputs)
-        outputs_yp = pretrain_model(inputs)
-        feature_c = current_model.takefeature(inputs)
-        if batch_idx == 0:
-            y_0 = outputs_y0
-            y_p = outputs_yp
-            Z_c = feature_c
-        else:
-            y_0 = torch.cat([y_0, outputs_y0], dim=0)
-            y_p = torch.cat([y_p, outputs_yp], dim=0)
-            Z_c = torch.cat([Z_c, feature_c], dim=0)
-        # y = N x 10
-        # Z = N x 512
-
-    all_ones = torch.ones(Z_c.shape[0], 1)
-    all_ones = all_ones.to(device)
-    Z_c_wbias = torch.cat([Z_c, all_ones], dim=1)
-
-    eI = args.epsilon_fix * torch.eye(Z_c.shape[1] + 1)
-    eI = eI.to(device)
-
-    w_0_fixed = torch.linalg.inv((torch.t(Z_c_wbias) @ Z_c_wbias) + eI) @ torch.t(Z_c_wbias) @ y_0
-    w_p_fixed = torch.linalg.inv((torch.t(Z_c_wbias) @ Z_c_wbias) + eI) @ torch.t(Z_c_wbias) @ y_p
-
-    return w_0_fixed, w_p_fixed
+def get_path(args):
+    if args.dataset == 'cifar100':
+        init_path = './ckpt/ResNet18/cifar100/Vanilla/24_08_05_21_55_49.20_sgd_lr-0.1_epoch-100_batchsize-128_wd-0.0005/model-init.pth'
+        pretrain_path = './ckpt/ResNet18/cifar100/Vanilla/24_08_05_21_55_49.20_sgd_lr-0.1_epoch-100_batchsize-128_wd-0.0005/model-last.pth'
+        if args.forget_class == 'rocket':
+            retrain_path = './ckpt/ResNet18/cifar100/retrain/rocket/24_08_06_00_21_27.81_sgd_lr-0.1_epoch-100_batchsize-128_wd-0.0005/model-last.pth'
+        elif args.forget_class == 'sea':
+            retrain_path = './ckpt/ResNet18/cifar100/retrain/sea/24_08_06_01_57_22.01_sgd_lr-0.1_epoch-100_batchsize-128_wd-0.0005/model-last.pth'
+        elif args.forget_class == 'cattle':
+            retrain_path = './ckpt/ResNet18/cifar100/retrain/vehicle2/24_08_31_01_39_46.48_sgd_lr-0.1_epoch-100_batchsize-128_wd-0.0005/model-last.pth'
+    elif args.dataset == 'cifar20':
+        init_path = './ckpt/ResNet18/cifar20/Vanilla/24_08_05_22_40_04.65_sgd_lr-0.1_epoch-100_batchsize-128_wd-0.0005/model-init.pth'
+        pretrain_path = './ckpt/ResNet18/cifar20/Vanilla/24_08_05_22_40_04.65_sgd_lr-0.1_epoch-100_batchsize-128_wd-0.0005/model-last.pth'
+        if args.forget_class == 'rocket':
+            retrain_path = './ckpt/ResNet18/cifar20/retrain/rocket/24_08_05_23_33_18.60_sgd_lr-0.1_epoch-100_batchsize-128_wd-0.0005/model-last.pth'
+        elif args.forget_class == 'sea':
+            retrain_path = './ckpt/ResNet18/cifar20/retrain/sea/24_08_06_01_09_25.71_sgd_lr-0.1_epoch-100_batchsize-128_wd-0.0005/model-last.pth'
+        elif args.forget_class == 'cattle':
+            retrain_path = './ckpt/ResNet18/cifar20/retrain/vehicle2/24_08_30_23_33_40.55_sgd_lr-0.1_epoch-100_batchsize-128_wd-0.0005/model-last.pth'
+    
+    return init_path, pretrain_path, retrain_path
 
 
 def train_yrk(net, init_model, pretrain_model, w_p, trainDL, retainDL, scheduler, optimizer: optim.Optimizer, criterion,
@@ -141,10 +130,12 @@ def train_yrk(net, init_model, pretrain_model, w_p, trainDL, retainDL, scheduler
 
         if (1 - retain_flag_int).sum() == 0:
             total_x = inputs
+            # total_y = pretrain_model(total_x)
             total_y = targets
         else:
             retain_data, forget_data = inputs[retain_flag], inputs[~retain_flag]
             retain_targets = targets[retain_flag]
+            # retain_targets = pretrain_model(retain_data)
             with torch.no_grad():
                 net.eval()
                 Z_u = net.takefeature(forget_data)  # N x 512
@@ -155,19 +146,25 @@ def train_yrk(net, init_model, pretrain_model, w_p, trainDL, retainDL, scheduler
                 Z_u_p = pretrain_model.takefeature(forget_data)
                 Z_u_p_wbias = torch.cat([Z_u_p, all_ones], dim=1)
 
+                # y_u = Z_u_wbias @ right_side  # N x 10
                 y_u = Z_u_wbias @ right_side - Z_u_p_wbias @ w_p
 
                 _, hard_y_u = torch.max(y_u, dim=1)
 
+                # print(hard_y_u.shape)
+
                 total_x = torch.cat([retain_data, forget_data], dim=0)
+                # total_y = torch.cat([retain_targets.float(), y_u.float()])
                 total_y = torch.cat([retain_targets, hard_y_u], dim=0)
 
                 pass
                 net.train()
 
+        # total_y = F.softmax(total_y / 1, dim=1)
         outputs = net(total_x)
         optimizer.zero_grad()
 
+        # loss = F.kl_div(F.log_softmax(outputs / 1, dim=1), total_y, reduction="batchmean")
         loss = criterion(outputs, total_y)
 
         loss.backward()
@@ -191,6 +188,7 @@ def train_yrk(net, init_model, pretrain_model, w_p, trainDL, retainDL, scheduler
 
         if args.debug or (batch_idx == len(trainDL) - 1):
             log.refresh(batch_idx, len(trainDL), msg)
+
 
     return 100. * correct_sample.sum / total_sample.sum, right_side
 
@@ -221,72 +219,52 @@ def get_right_side(retainDL, net, pretrain_model, device, args, w_0, w_p):
     all_ones = torch.ones(Z.shape[0], 1)
     all_ones = all_ones.to(device)
     Z_wbias = torch.cat([Z, all_ones], dim=1)  # Z with bias = N x (512+1)
-    Z_p_wbias = torch.cat([Z, all_ones], dim=1)  # Z with bias = N x (512+1)
 
-    eI = args.epsilon_rs * torch.eye(Z.shape[0])
-    eI = eI.to(device)
+    eI_N = args.epsilon_rs * torch.eye(Z.shape[0])
+    eI_N = eI_N.to(device)
 
-    Pi_rp = torch.t(Z_wbias) @ torch.linalg.inv(Z_wbias @ torch.t(Z_wbias) + eI) @ Z_p_wbias  # Pi_r = (512+1) x (512+1)
-    Pi_r = torch.t(Z_wbias) @ torch.linalg.inv(Z_wbias @ torch.t(Z_wbias) + eI) @ Z_wbias  # Pi_r = (512+1) x (512+1)
-    right_side = Pi_rp @ w_p - Pi_r @ w_0 + w_0 + w_p
+    # Changed by Woodbury Identity - Matrix Invertion Lemma 
+    eI_D = args.epsilon_rs * torch.eye(Z.shape[1] + 1)
+    eI_D = eI_D.to(device) 
+
+    fast_inv = torch.linalg.inv(eI_N) - torch.linalg.inv(eI_N) @ Z_wbias @ torch.linalg.inv(torch.linalg.inv(eI_D) + torch.t(Z_wbias) @ torch.linalg.inv(eI_N) @ Z_wbias) @ torch.t(Z_wbias) @ torch.linalg.inv(eI_N)
+    Pi_r = torch.t(Z_wbias) @ fast_inv @ Z_wbias
+
+    right_side = Pi_r @ (w_p - w_0) + w_0 + w_p
 
     return right_side
 
 
 if __name__ == '__main__':
     args = get_args()
-    # Fix an index fault.
-    if args.forget_class == 'cattle':
-        args.forget_class = 'vehicle2'
+    seed_torch(args.seed)
     args.code_file = __file__
     set_resumeCKPT(args)
 
     args = update_ckpt(args)
     log = LogProcessBar(args.logfile, args)
 
-    # os.environ["CUDA_VISIBLE_DEVICES"] = '1, 3, 0'
-
     _, gpuid = auto_select_device(memory_max=8000, memory_bias=200, strategy='greedy')
     os.environ["CUDA_VISIBLE_DEVICES"] = str(gpuid)
     device = 'cuda' if torch.cuda.is_available() else 'cpu'
 
-    print(torch.cuda.device_count())
-    print(torch.cuda.get_device_name())
-    print(torch.cuda.current_device())
-
     if args.dataset == 'cifar10':
         num_of_classes = 10
-    elif args.dataset == 'cifar100':
+    elif args.dataset == 'cifar100' :
         num_of_classes = 100
-        init_model1 = torch.load(
-            './ckpt/ResNet18/cifar100/Vanilla/24_08_05_21_55_49.20_sgd_lr-0.1_epoch-100_batchsize-128_wd-0.0005/model-init.pth')
-        pretrain_model1 = torch.load(
-            './ckpt/ResNet18/cifar100/Vanilla/24_08_05_21_55_49.20_sgd_lr-0.1_epoch-100_batchsize-128_wd-0.0005/model-last.pth')
-        if args.forget_class == 'rocket':
-            retrain_model1 = torch.load(
-                './ckpt/ResNet18/cifar100/retrain/rocket/24_08_06_00_21_27.81_sgd_lr-0.1_epoch-100_batchsize-128_wd-0.0005/model-last.pth')
-        elif args.forget_class == 'sea':
-            retrain_model1 = torch.load(
-                './ckpt/ResNet18/cifar100/retrain/sea/24_08_06_01_57_22.01_sgd_lr-0.1_epoch-100_batchsize-128_wd-0.0005/model-last.pth')
     elif args.dataset == 'cifar20':
         num_of_classes = 20
-        init_model1 = torch.load(
-            './ckpt/ResNet18/cifar20/Vanilla/24_08_05_22_40_04.65_sgd_lr-0.1_epoch-100_batchsize-128_wd-0.0005/model-init.pth')
-        pretrain_model1 = torch.load(
-            './ckpt/ResNet18/cifar20/Vanilla/24_08_05_22_40_04.65_sgd_lr-0.1_epoch-100_batchsize-128_wd-0.0005/model-last.pth')
-        if args.forget_class == 'rocket':
-            retrain_model1 = torch.load(
-                './ckpt/ResNet18/cifar20/retrain/rocket/24_08_05_23_33_18.60_sgd_lr-0.1_epoch-100_batchsize-128_wd-0.0005/model-last.pth')
-        elif args.forget_class == 'sea':
-            retrain_model1 = torch.load(
-                './ckpt/ResNet18/cifar20/retrain/sea/24_08_06_01_09_25.71_sgd_lr-0.1_epoch-100_batchsize-128_wd-0.0005/model-last.pth')
     elif args.dataset == 'tinyimagenet':
         num_of_classes = 200
     else:
         num_of_classes = 0
         raise NotImplementedError
-
-    w_0_wbias, w_p_wbias, w_r_wbias = get_w_wbias(init_model1, pretrain_model1, retrain_model1)
+    
+    init_path, pretrain_path, retrain_path = get_path(args)
+    init_model_tmp = torch.load(init_path)
+    pretrain_model_tmp = torch.load(pretrain_path)
+    retrain_model_tmp = torch.load(retrain_path)
+    w_0_wbias, w_p_wbias, w_r_wbias = get_w_wbias(init_model_tmp, pretrain_model_tmp, retrain_model_tmp)
 
     print('==> Building model..')
     net = get_model(args.model, num_of_classes=num_of_classes, dataset=args.dataset)
@@ -299,34 +277,10 @@ if __name__ == '__main__':
     pretrain_model = deepcopy(net)
     retrain_model = deepcopy(net)
 
-    if args.dataset == 'cifar100':
-        checkpoint_init = torch.load(
-            './ckpt/ResNet18/cifar100/Vanilla/24_08_05_21_55_49.20_sgd_lr-0.1_epoch-100_batchsize-128_wd-0.0005/model-init.pth')
-        init_model.load_state_dict(checkpoint_init['net'])
-        checkpoint_p = torch.load(
-            './ckpt/ResNet18/cifar100/Vanilla/24_08_05_21_55_49.20_sgd_lr-0.1_epoch-100_batchsize-128_wd-0.0005/model-last.pth')
-        init_model.load_state_dict(checkpoint_init['net'])
-        if args.forget_class == 'rocket':
-            checkpoint_r = torch.load(
-                './ckpt/ResNet18/cifar100/retrain/rocket/24_08_06_00_21_27.81_sgd_lr-0.1_epoch-100_batchsize-128_wd-0.0005/model-last.pth')
-        elif args.forget_class == 'sea':
-            checkpoint_r = torch.load(
-                './ckpt/ResNet18/cifar100/retrain/sea/24_08_06_01_57_22.01_sgd_lr-0.1_epoch-100_batchsize-128_wd-0.0005//model-last.pth')
-        retrain_model.load_state_dict(checkpoint_r['net'])
-    elif args.dataset == 'cifar20':
-        checkpoint_init = torch.load(
-            './ckpt/ResNet18/cifar20/Vanilla/24_08_05_22_40_04.65_sgd_lr-0.1_epoch-100_batchsize-128_wd-0.0005/model-init.pth')
-        init_model.load_state_dict(checkpoint_init['net'])
-        checkpoint_p = torch.load(
-            './ckpt/ResNet18/cifar20/Vanilla/24_08_05_22_40_04.65_sgd_lr-0.1_epoch-100_batchsize-128_wd-0.0005/model-last.pth')
-        init_model.load_state_dict(checkpoint_init['net'])
-        if args.forget_class == 'rocket':
-            checkpoint_r = torch.load(
-                './ckpt/ResNet18/cifar20/retrain/rocket/24_08_05_23_33_18.60_sgd_lr-0.1_epoch-100_batchsize-128_wd-0.0005/model-last.pth')
-        elif args.forget_class == 'sea':
-            checkpoint_r = torch.load(
-                './ckpt/ResNet18/cifar20/retrain/sea/24_08_06_01_09_25.71_sgd_lr-0.1_epoch-100_batchsize-128_wd-0.0005/model-last.pth')
-        retrain_model.load_state_dict(checkpoint_r['net'])
+    checkpoint_init = torch.load(init_path)
+    init_model.load_state_dict(checkpoint_init['net'])
+    checkpoint_r = torch.load(retrain_path)
+    retrain_model.load_state_dict(checkpoint_r['net'])
 
     if device == 'cuda':
         cudnn.benchmark = True
@@ -353,18 +307,20 @@ if __name__ == '__main__':
 
     right_side = get_right_side(retainDL_inTrainSet, net, pretrain_model, device, args, w_0_wbias, w_p_wbias)
 
+    angles = np.linspace(0, np.pi, args.epoch)
+    rs_values = args.epsilon_rs + (1e-2 - args.epsilon_rs) * (1 - np.cos(angles)) / 2
+
     for epoch in range(args.epoch):
         start_time = time.time()
-        log.log_print("\nEpoch:{} | Model:{} | lr now:{:.6f}".format(epoch, args.model,
-                                                                     optimizer.state_dict()['param_groups'][0]['lr']))
+        args.epsilon_rs = rs_values[epoch]
+        log.log_print("\nEpoch:{} | Model:{} | lr now:{:.6f} | rs now:{:.6f}".format(epoch, args.model,
+                                                                    optimizer.state_dict()['param_groups'][0]['lr'], args.epsilon_rs))
 
         _, _ = train_yrk(net, init_model, pretrain_model, w_p_wbias, trainDL_full, retainDL_inTrainSet, scheduler,
-                         optimizer, criterion, log, device, args, right_side)
+                        optimizer, criterion, log, device, args, right_side)
         _, retain_acc = valid_test(net, retainDL_inTestSet, "Retain Acc on Test", device, criterion, log, args=args)
-        _, forget_acc_on_train = valid_test(net, forgetDL_inTrainSet, "Forget Acc on Train", device, criterion, log,
-                                            args=args)
         _, forget_acc_on_test = valid_test(net, forgetDL_inTestSet, "Forget Acc on Test", device, criterion, log,
-                                           args=args)
+                                        args=args)
 
         epoch_time.update(time.time() - start_time)
         print("Finished at:" + datetime.datetime.fromtimestamp(
@@ -373,17 +329,9 @@ if __name__ == '__main__':
         right_side = get_right_side(retainDL_inTrainSet, net, pretrain_model, device, args, w_0_wbias, w_p_wbias)
 
         mia = get_membership_attack_prob(retainDL_inTrainSet, forgetDL_inTrainSet, testDL, net)
+        log.log_print("Retain Acc:{:.3f}\tForget Acc on Test:{:.3f}\tMIA:{:.3f}".format(
+            retain_acc, forget_acc_on_test, mia))
 
-    _, test_acc = valid_test(retrain_model, testDL, "Test Acc", device, criterion, log, args=args)
-    _, forget_acc = valid_test(retrain_model, forgetDL_inTestSet, "Forget Acc", device, criterion, log, args=args)
-
-    net_w = torch.cat([retrain_model.net.linear.weight, retrain_model.net.linear.bias.reshape(-1, 1)], dim=1)
-    net_w_wbias = torch.t(net_w)
-    print(torch.linalg.norm(net_w_wbias - w_r_wbias, 'fro') / torch.linalg.norm(w_r_wbias, 'fro'))
-
-    mia = get_membership_attack_prob(retainDL_inTrainSet, forgetDL_inTrainSet, testDL, net)
-    log.log_print("Retain Acc:{:.3f}\tForget Acc on Test:{:.3f}\tMIA:{:.3f}".format(
-        retain_acc, forget_acc, mia))
 
     last_model = {
         'net': deepcopy(net.state_dict()),
@@ -392,3 +340,6 @@ if __name__ == '__main__':
     saveModel(best_model, args.ckpt.replace('.pth', '-best.pth'))
 
     save_running_results(args)
+
+    print('\n Each exp:', retain_acc, forget_acc_on_test, mia)
+
